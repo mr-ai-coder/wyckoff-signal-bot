@@ -253,28 +253,40 @@ function App(){
   };
 
   const fetchCandles=async(sym,iv,limit=180)=>{
-    const base=proxy.trim().replace(/\/$/,"");
+    const base=proxy.trim().replace(/\/+$/,"");
     const type=assetType(sym);
+
     if(type==="crypto"){
       const r=await fetch(`${base}/?symbol=${sym}&interval=${iv}&limit=${limit}`);
       const d=await r.json();
-      if(!Array.isArray(d)) throw new Error("Binance: "+JSON.stringify(d).slice(0,100));
+      if(!Array.isArray(d)) throw new Error("Binance Fehler: "+JSON.stringify(d).slice(0,100));
       return d;
-    } else {
-      // Alpha Vantage via Cloudflare proxy /forex endpoint
-      const avIv=iv==="4h"?"60min":iv==="1h"?"60min":"15min";
-      const func=type==="index"?"TIME_SERIES_INTRADAY":(sym==="XAUUSD"||sym==="XAGUSD")?"FX_INTRADAY":"FX_INTRADAY";
-      const fromSym=sym.slice(0,3), toSym=sym.slice(3);
-      const r=await fetch(`${base}/forex?from_symbol=${fromSym}&to_symbol=${toSym}&interval=${avIv}&outputsize=compact`);
-      const d=await r.json();
-      // Convert AV format to Binance-like format [ts,o,h,l,c,v]
-      const key=Object.keys(d).find(k=>k.includes("Time Series"));
-      if(!key) throw new Error("AV Fehler: "+JSON.stringify(d).slice(0,150));
-      const series=d[key];
-      return Object.entries(series).sort((a,b)=>a[0]<b[0]?-1:1).map(([ts,v])=>[
-        Date.parse(ts),v["1. open"],v["2. high"],v["3. low"],v["4. close"],v["5. volume"]||"1000"
-      ]);
     }
+
+    // Forex / Metals / Indices via Alpha Vantage
+    const avIv = iv==="15m"?"15min":"60min";
+    const fromSym = sym.slice(0,3);
+    const toSym   = sym.slice(3)||"USD";
+    const r=await fetch(`${base}/?type=forex&from_symbol=${fromSym}&to_symbol=${toSym}&interval=${avIv}&outputsize=compact`);
+    const d=await r.json();
+
+    // Check for AV error
+    if(d["Error Message"]) throw new Error("Alpha Vantage: "+d["Error Message"]);
+    if(d["Note"]) throw new Error("Alpha Vantage Limit: "+d["Note"].slice(0,100));
+    if(d["Information"]) throw new Error("AV API Limit erreicht — warte 1 Minute");
+
+    // Find the time series key (works for FX_INTRADAY and TIME_SERIES_INTRADAY)
+    const key=Object.keys(d).find(k=>k.includes("Time Series"));
+    if(!key) throw new Error("AV: Kein Time Series — "+JSON.stringify(Object.keys(d)));
+
+    // Convert to Binance-like format [ts, open, high, low, close, volume]
+    return Object.entries(d[key])
+      .sort((a,b)=>a[0]<b[0]?-1:1)
+      .map(([ts,v])=>[
+        Date.parse(ts),
+        v["1. open"], v["2. high"], v["3. low"], v["4. close"],
+        v["5. volume"]||v["5. Trading Day Volume"]||"1000"
+      ]);
   };
 
   const loadLive=async()=>{
@@ -354,7 +366,7 @@ Signal only if 6+ filters pass. Be specific with price levels.`;
 
     try{
       const base=proxy.trim().replace(/\/$/,"");
-      const res=await fetch(`${base}/claude`,{
+      const res=await fetch(`${base}/?type=claude`,{
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
