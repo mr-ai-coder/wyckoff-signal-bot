@@ -51,8 +51,8 @@ Return ONLY valid JSON, no markdown:
 }`;
 
 const store = {
-  get: async (k) => { try { const r = await window.storage.get(k); return r ? JSON.parse(r.value) : null; } catch { return null; } },
-  set: async (k, v) => { try { await window.storage.set(k, JSON.stringify(v)); } catch {} }
+  get: async (k) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; } },
+  set: async (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
 };
 
 const SIG = {
