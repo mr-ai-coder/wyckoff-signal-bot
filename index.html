@@ -72,13 +72,121 @@ const ema=(arr,p)=>arr.reduce((a,v,i)=>i===0?v:v*(2/(p+1))+a*(1-2/(p+1)),arr[0])
 
 const summarize=(raw)=>{
   if(!raw||raw.length<10)return null;
-  const cl=raw.map(c=>+c[4]),hi=raw.map(c=>+c[2]),lo=raw.map(c=>+c[3]),vo=raw.map(c=>+c[5]);
+  const cl=raw.map(c=>+c[4]),hi=raw.map(c=>+c[2]),lo=raw.map(c=>+c[3]),vo=raw.map(c=>+c[5]),op=raw.map(c=>+c[1]);
+  const n=cl.length;
   const avgV=vo.reduce((a,b)=>a+b,0)/vo.length;
+
+  // MACD 4C calculation
+  const ema12=ema(cl,12), ema26=ema(cl,26);
+  const macdLine=ema12-ema26;
+  // Compute full MACD series for last 30 bars
+  const macdSeries=cl.map((_,i)=>{
+    if(i<26)return 0;
+    const slice=cl.slice(0,i+1);
+    return ema(slice,12)-ema(slice,26);
+  });
+  const signalSeries=macdSeries.map((_,i)=>{
+    if(i<35)return 0;
+    return ema(macdSeries.slice(0,i+1),9);
+  });
+  const hist=macdSeries.map((m,i)=>m-signalSeries[i]);
+  const lastHist=hist[n-1], prevHist=hist[n-2], prev2Hist=hist[n-3];
+
+  // 4C MACD color
+  let macdColor="Dark Red";
+  if(lastHist>0 && lastHist>prevHist) macdColor="Dark Green";
+  else if(lastHist>0 && lastHist<=prevHist) macdColor="Light Green";
+  else if(lastHist<0 && lastHist>prevHist) macdColor="Light Red";
+  else macdColor="Dark Red";
+
+  // Detect divergence
+  const recentLows=lo.slice(-20), recentHighs=hi.slice(-20);
+  const recentHistLows=hist.slice(-20), recentHistHighs=hist.slice(-20);
+  const priceMakingLL=lo[n-1]<Math.min(...lo.slice(-10,-1));
+  const macdMakingHL=hist[n-1]>Math.min(...hist.slice(-10,-1));
+  const bullishDiv=priceMakingLL&&macdMakingHL&&lastHist<0;
+  const priceMakingHH=hi[n-1]>Math.max(...hi.slice(-10,-1));
+  const macdMakingLH=hist[n-1]<Math.max(...hist.slice(-10,-1));
+  const bearishDiv=priceMakingHH&&macdMakingLH&&lastHist>0;
+
+  // Wyckoff structure detection
+  const h60=Math.max(...hi.slice(-60)), l60=Math.min(...lo.slice(-60));
+  const h20=Math.max(...hi.slice(-20)), l20=Math.min(...lo.slice(-20));
+  const h5=Math.max(...hi.slice(-5)),   l5=Math.min(...lo.slice(-5));
+  const rangePos=(cl[n-1]-l60)/(h60-l60||1); // 0=bottom 1=top
+
+  // Detect SC/Spring: large volume + price near 60-period low + reversal
+  const maxVol=Math.max(...vo.slice(-60));
+  const scCandle=vo.slice(-60).findIndex(v=>v>avgV*2.5 && lo[n-60+vo.slice(-60).indexOf(v)]<l60*1.02);
+  const nearRangeBottom=rangePos<0.3;
+  const nearRangeTop=rangePos>0.7;
+  const springDetected=nearRangeBottom && cl[n-1]>op[n-1] && lo[n-1]<l20 && vo[n-1]>avgV*1.5;
+
+  // BOS/CHoCH detection (simplified)
+  const swingHigh=Math.max(...hi.slice(-10));
+  const swingLow=Math.min(...lo.slice(-10));
+  const prevSwingHigh=Math.max(...hi.slice(-20,-10));
+  const prevSwingLow=Math.min(...lo.slice(-20,-10));
+  const bosUp=cl[n-1]>prevSwingHigh;
+  const bosDown=cl[n-1]<prevSwingLow;
+
+  // Equal Highs/Lows detection (within 0.3%)
+  const tolerance=0.003;
+  let eqHighs=null, eqLows=null;
+  for(let i=n-20;i<n-3;i++){
+    if(Math.abs(hi[i]-hi[n-1])/hi[n-1]<tolerance && hi[i]>hi[n-2]) eqHighs=hi[i].toFixed(2);
+    if(Math.abs(lo[i]-lo[n-1])/lo[n-1]<tolerance && lo[i]<lo[n-2]) eqLows=lo[i].toFixed(2);
+  }
+
+  // FVG detection (last 30 candles)
+  let fvg=null;
+  for(let i=n-30;i<n-2;i++){
+    const gap=lo[i+2]-hi[i];
+    if(gap>0 && gap/cl[i]>0.002){ fvg={low:hi[i].toFixed(2),high:lo[i+2].toFixed(2),dir:"bullish"}; }
+    const gap2=lo[i]-hi[i+2];
+    if(gap2>0 && gap2/cl[i]>0.002){ fvg={low:hi[i+2].toFixed(2),high:lo[i].toFixed(2),dir:"bearish"}; }
+  }
+
+  // Volume profile approximation using price buckets
+  const priceRange=h60-l60, buckets=20;
+  const volProfile=Array(buckets).fill(0);
+  for(let i=n-60;i<n;i++){
+    const bucket=Math.min(buckets-1,Math.floor((cl[i]-l60)/priceRange*buckets));
+    volProfile[bucket]+=vo[i];
+  }
+  const pocBucket=volProfile.indexOf(Math.max(...volProfile));
+  const poc=(l60+pocBucket/buckets*priceRange).toFixed(2);
+  // VAH/VAL: find 70% volume range
+  const totalVol=volProfile.reduce((a,b)=>a+b,0);
+  let cumVol=0, vahBucket=pocBucket, valBucket=pocBucket;
+  let up=pocBucket+1, dn=pocBucket-1;
+  cumVol=volProfile[pocBucket];
+  while(cumVol/totalVol<0.7 && (up<buckets||dn>=0)){
+    const upV=up<buckets?volProfile[up]:0;
+    const dnV=dn>=0?volProfile[dn]:0;
+    if(upV>=dnV&&up<buckets){cumVol+=upV;vahBucket=up;up++;}
+    else if(dn>=0){cumVol+=dnV;valBucket=dn;dn--;}
+    else break;
+  }
+  const vah=(l60+vahBucket/buckets*priceRange).toFixed(2);
+  const val=(l60+valBucket/buckets*priceRange).toFixed(2);
+
+  // Trend: higher highs/lows or lower highs/lows
+  const trend=h20>prevSwingHigh&&l20>prevSwingLow?"Bullish":h20<prevSwingHigh&&l20<prevSwingLow?"Bearish":"Neutral";
+
   return{
-    price:cl[cl.length-1].toLocaleString("de-AT",{minimumFractionDigits:2,maximumFractionDigits:2}),
-    h20:Math.max(...hi.slice(-20)),l20:Math.min(...lo.slice(-20)),
-    volRatio:(vo[vo.length-1]/avgV).toFixed(1),
-    macd:(ema(cl,12)-ema(cl,26)).toFixed(4)
+    price:cl[n-1].toFixed(2),
+    h20:h20.toFixed(2), l20:l20.toFixed(2),
+    h60:h60.toFixed(2), l60:l60.toFixed(2),
+    volRatio:(vo[n-1]/avgV).toFixed(1),
+    macdValue:macdLine.toFixed(4),
+    macdColor, bullishDiv, bearishDiv,
+    springDetected, nearRangeBottom, nearRangeTop,
+    bosUp, bosDown, trend,
+    eqHighs, eqLows, fvg,
+    poc, vah, val,
+    rangePos:rangePos.toFixed(2),
+    lastClose:cl[n-1], lastVol:vo[n-1], avgVol:avgV.toFixed(0)
   };
 };
 
@@ -154,36 +262,75 @@ function App(){
     setLoad(false);
   };
 
-  const generate=async()=>{
+  const generate=async(manualMode=false)=>{
+    if(!proxy){setErr("Proxy URL eintragen"); return;}
     setRun(true); setRes(null); setErr(""); setTab("result");
 
-    const liveCtx = live ? `
-LIVE BINANCE (${pair}, 180 Kerzen):
-4H:  $${live["4h"]?.price} | Bereich $${live["4h"]?.l20}–$${live["4h"]?.h20} | Vol ${live["4h"]?.volRatio}x | MACD ${live["4h"]?.macd}
-1H:  $${live["1h"]?.price} | Bereich $${live["1h"]?.l20}–$${live["1h"]?.h20} | Vol ${live["1h"]?.volRatio}x | MACD ${live["1h"]?.macd}
-15M: $${live["15m"]?.price} | Bereich $${live["15m"]?.l20}–$${live["15m"]?.h20} | Vol ${live["15m"]?.volRatio}x | MACD ${live["15m"]?.macd}` : "";
+    // Always fetch fresh live data first
+    let freshLive=live;
+    if(!freshLive){
+      try{
+        const base=proxy.trim().replace(/\/$/,"");
+        const [r4,r1,r15]=await Promise.all(
+          ["4h","1h","15m"].map(iv=>
+            fetch(`${base}/?symbol=${pair}&interval=${iv}&limit=180`).then(r=>r.json())
+          )
+        );
+        freshLive={"4h":summarize(r4),"1h":summarize(r1),"15m":summarize(r15)};
+        setLive(freshLive);
+      }catch(e){setErr("Live-Daten Fehler: "+e.message);setRun(false);return;}
+    }
 
-    const msg=`Analysiere ${pair} mit allen 10 Filtern.
-Session: ${sess.txt} (UTC ${new Date().getUTCHours()}h)
-${liveCtx}
+    const d4=freshLive["4h"], d1=freshLive["1h"], d15=freshLive["15m"];
 
-CHART BEOBACHTUNGEN:
-4H Wyckoff + MACD: ${f4h||"Nicht angegeben — Live-Daten verwenden"}
-1H Struktur: ${f1h||"Nicht angegeben"}
-15M MACD Farbe: ${f15m||"Nicht angegeben"}
+    // Build rich automatic context
+    const autoCtx=`
+LIVE BINANCE DATA — ${pair} — Auto-computed from 180 candles each timeframe:
 
-LIQUIDITÄT:
-Equal Highs: ${eqH||"Nicht beobachtet"}
-Equal Lows: ${eqL||"Nicht beobachtet"}
-FVG: ${fvg||"Nicht beobachtet"}
-Orderblock: ${ob||"Nicht beobachtet"}
+4H ANALYSIS:
+  Price: $${d4?.price} | 60-bar range: $${d4?.l60}–$${d4?.h60} | Range position: ${(+d4?.rangePos*100).toFixed(0)}% from bottom
+  20-bar High/Low: $${d4?.h20}/$${d4?.l20}
+  Trend: ${d4?.trend} | BOS Up: ${d4?.bosUp} | BOS Down: ${d4?.bosDown}
+  MACD 4C Color: ${d4?.macdColor} (value: ${d4?.macdValue})
+  Bullish Divergence: ${d4?.bullishDiv} | Bearish Divergence: ${d4?.bearishDiv}
+  Spring Detected: ${d4?.springDetected} | Near Bottom: ${d4?.nearRangeBottom} | Near Top: ${d4?.nearRangeTop}
+  Volume: ${d4?.volRatio}x avg
+  Equal Highs: ${d4?.eqHighs||"None"} | Equal Lows: ${d4?.eqLows||"None"}
+  FVG: ${d4?.fvg?`${d4.fvg.dir} gap $${d4.fvg.low}–$${d4.fvg.high}`:"None detected"}
+  Volume Profile → POC: $${d4?.poc} | VAH: $${d4?.vah} | VAL: $${d4?.val}
 
-VOLUME PROFILE:
-POC: ${poc||"—"} | VAH: ${vah||"—"} | VAL: ${val_||"—"}
+1H ANALYSIS:
+  Price: $${d1?.price} | Trend: ${d1?.trend} | BOS Up: ${d1?.bosUp} | BOS Down: ${d1?.bosDown}
+  MACD 4C Color: ${d1?.macdColor} | Bullish Div: ${d1?.bullishDiv} | Bearish Div: ${d1?.bearishDiv}
+  Volume: ${d1?.volRatio}x avg
+  Equal Highs: ${d1?.eqHighs||"None"} | Equal Lows: ${d1?.eqLows||"None"}
 
-OFFENE POSITIONEN: ${pos||"Keine"}
+15M ANALYSIS:
+  Price: $${d15?.price} | Trend: ${d15?.trend}
+  MACD 4C Color: ${d15?.macdColor} — THIS IS THE ENTRY TRIGGER
+  Bullish Div: ${d15?.bullishDiv} | Bearish Div: ${d15?.bearishDiv}
+  Volume: ${d15?.volRatio}x avg
+  Spring: ${d15?.springDetected}`;
 
-Bewerte jeden Filter. Signal nur wenn 6+ Filter bestanden.`;
+    // Add manual notes if provided
+    const manualCtx=manualMode&&(f4h||f1h||f15m)?`
+
+ADDITIONAL MANUAL OBSERVATIONS:
+4H notes: ${f4h||"—"}
+1H notes: ${f1h||"—"}
+15M notes: ${f15m||"—"}
+${eqH?`Equal Highs: ${eqH}`:""}${eqL?`\nEqual Lows: ${eqL}`:""}${fvg?`\nFVG: ${fvg}`:""}${ob?`\nOrderblock: ${ob}`:""}${poc?`\nPOC override: ${poc}`:""}${pos?`\nOpen positions: ${pos}`:""}`:""
+
+    const msg=`Fully auto-analyze ${pair} using all 10 filters. All data is computed directly from 180 live Binance candles.
+
+SESSION: ${sess.txt} (UTC ${new Date().getUTCHours()}h)
+${autoCtx}${manualCtx}
+
+Based ONLY on the computed data above, apply all 10 filters and generate the signal. 
+The MACD 4C colors are already computed — use them directly.
+The Volume Profile POC/VAH/VAL are already computed — use them for targets.
+Equal Highs/Lows and FVGs are already detected — use them for liquidity analysis.
+Signal only if 6+ filters pass. Be specific with price levels.`;
 
     try{
       const base=proxy.trim().replace(/\/$/,"");
@@ -197,14 +344,14 @@ Bewerte jeden Filter. Signal nur wenn 6+ Filter bestanden.`;
           messages:[{role:"user",content:msg}]
         })
       });
-      if(!res.ok){const t=await res.text();throw new Error(`${res.status}: ${t.slice(0,200)}`);}
+      if(!res.ok){const t=await res.text();throw new Error(`${res.status}: ${t.slice(0,300)}`);}
       const data=await res.json();
       const raw=data.content?.map(b=>b.text||"").join("").replace(/```json|```/g,"").trim();
       const m=raw?.match(/\{[\s\S]*\}/);
       if(!m) throw new Error("Kein JSON in Antwort");
       const parsed=JSON.parse(m[0]);
       setRes(parsed);
-      const newH=[{pair,result:parsed,ts:new Date().toLocaleTimeString("de-AT"),price:live?.["4h"]?.price},...hist.slice(0,4)];
+      const newH=[{pair,result:parsed,ts:new Date().toLocaleTimeString("de-AT"),price:d4?.price},...hist.slice(0,4)];
       setHist(newH); ls.set("hist",newH);
     }catch(e){setErr("Fehler: "+e.message); setTab("input");}
     setRun(false);
@@ -268,123 +415,69 @@ Bewerte jeden Filter. Signal nur wenn 6+ Filter bestanden.`;
         {/* ═══════════════ INPUT TAB ═══════════════ */}
         {tab==="input" && (
           <div className="si">
-
-            {/* Pair + Live Loader */}
-            <div style={{background:C.midbg,border:`1px solid ${C.border}`,borderRadius:6,padding:14,marginBottom:12}}>
-              <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
-                <div>
-                  <Label>TRADING PAIR</Label>
-                  <select style={{width:"auto"}} value={pair} onChange={e=>{setPair(e.target.value);ls.set("pair",e.target.value);}}>
-                    {PAIRS.map(p=><option key={p}>{p}</option>)}
-                  </select>
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                  <button onClick={loadLive} disabled={loading||!proxyOk} style={{
-                    background:live?"#071a0f":C.blue+"22",border:`1px solid ${live?C.green:C.blue}`,
-                    color:live?C.green:C.blue,padding:"8px 18px",fontSize:10,letterSpacing:1,
-                    opacity:!proxyOk?0.4:1
-                  }}>
-                    {loading?"⏳ LÄDT...":live?"✅ NEU LADEN":"📡 LIVE DATEN LADEN"}
+            <div style={{background:C.midbg,border:`2px solid ${C.purple}`,borderRadius:8,padding:20,marginBottom:14,textAlign:"center"}}>
+              <div style={{fontSize:11,color:"#b39ddb",letterSpacing:2,marginBottom:8,fontWeight:700}}>VOLLAUTOMATISCHE ANALYSE</div>
+              <div style={{fontSize:12,color:"#5a4a7a",marginBottom:16,lineHeight:1.8}}>
+                Pair wählen → Button klicken → fertig.<br/>
+                <span style={{color:"#7c4dff"}}>Wyckoff · MACD 4C · FVG · Equal Highs/Lows · Volume Profile · POC/VAH/VAL</span><br/>
+                <span style={{color:"#3a3060",fontSize:10}}>alles automatisch aus 180 echten Binance-Kerzen</span>
+              </div>
+              <div style={{display:"flex",justifyContent:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+                {["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ETHBTC"].map(p=>(
+                  <button key={p} onClick={()=>{setPair(p);ls.set("pair",p);setLive(null);}}
+                    style={{background:pair===p?C.purple+"44":"transparent",border:`1px solid ${pair===p?C.purple:"#2a2040"}`,color:pair===p?"#b39ddb":"#3a3060",padding:"6px 14px",fontSize:11,borderRadius:20,cursor:"pointer"}}>
+                    {p}
                   </button>
-                  {proxyOk && <label style={{display:"flex",alignItems:"center",gap:5,fontSize:9,color:"#3a5a7a",cursor:"pointer"}}>
-                    <input type="checkbox" checked={autoLoad} onChange={e=>{setAuto(e.target.checked);ls.set("autoLoad",e.target.checked);}}/>
-                    Auto-laden bei Pair-Wechsel
-                  </label>}
-                </div>
-                {live && (
-                  <div style={{background:"#071a0f",border:`1px solid ${C.green}44`,borderRadius:4,padding:"8px 12px",fontSize:11}}>
-                    <div style={{color:C.green,fontWeight:700,fontSize:14}}>💰 ${live["4h"]?.price}</div>
-                    <div style={{color:"#3a5a7a",fontSize:9,marginTop:2}}>180 Kerzen · 4H/1H/15M geladen</div>
-                    <div style={{color:"#3a5a7a",fontSize:9}}>Vol 4H: {live["4h"]?.volRatio}x · MACD: {live["4h"]?.macd}</div>
-                  </div>
-                )}
+                ))}
+                <select style={{background:"#0a0f15",border:"1px solid #2a2040",color:"#5a4a7a",padding:"6px 10px",borderRadius:20,fontSize:11}}
+                  onChange={e=>{if(e.target.value){setPair(e.target.value);ls.set("pair",e.target.value);setLive(null);}}}>
+                  <option value="">+ mehr</option>
+                  {["LINKUSDT","AVAXUSDT","BTCUSDC","ETHUSDC","BNBUSDC","SOLBTC","BNBBTC"].map(p=><option key={p}>{p}</option>)}
+                </select>
               </div>
-            </div>
-
-            {/* WYCKOFF + MACD */}
-            <div style={{background:C.midbg,border:`1px solid #1a2a4a`,borderRadius:6,padding:14,marginBottom:10}}>
-              <Label col={C.blue}>WYCKOFF + 4C MACD — Was siehst du auf deinen Charts?</Label>
-              <div style={{fontSize:10,color:"#3a5a7a",marginBottom:10}}>
-                Öffne TradingView mit 4C MACD Indikator. Beschreibe kurz was du siehst — auch Stichworte reichen.
-              </div>
-              {[
-                ["4H",C.blue,"Wyckoff Phase + MACD Farbe","z.B. Phase C, Spring gedruckt, MACD Dark Red wird kleiner"],
-                ["1H","#b39ddb","Strukturwechsel","z.B. CHoCH bei $71.200, MACD dreht grün"],
-                ["15M",C.green,"MACD Farbe — das ist der Trigger!","z.B. Dark Red → Light Red, Preis korrigiert 60%"],
-              ].map(([l,col,sub,ph,])=>(
-                <div key={l} style={{marginBottom:10}}>
-                  <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4}}>
-                    <span style={{fontSize:18,fontWeight:700,color:col,letterSpacing:2,minWidth:30}}>{l}</span>
-                    <span style={{fontSize:10,color:"#3a5a7a"}}>{sub}</span>
-                  </div>
-                  <textarea rows={2} style={{width:"100%"}} placeholder={ph}
-                    value={l==="4H"?f4h:l==="1H"?f1h:f15m}
-                    onChange={e=>l==="4H"?setF4h(e.target.value):l==="1H"?setF1h(e.target.value):setF15m(e.target.value)}/>
+              {live && (
+                <div style={{background:"#071a0f",border:`1px solid ${C.green}44`,borderRadius:6,padding:"10px 16px",marginBottom:14,display:"inline-flex",gap:12,flexWrap:"wrap",alignItems:"center"}}>
+                  <span style={{color:C.green,fontSize:18,fontWeight:700}}>💰 ${live["4h"]?.price}</span>
+                  <span style={{color:"#3a5a7a",fontSize:10}}>MACD: <span style={{color:live["4h"]?.macdColor?.includes("Green")?C.green:live["4h"]?.macdColor==="Light Red"?C.yellow:C.red,fontWeight:700}}>{live["4h"]?.macdColor}</span></span>
+                  <span style={{color:"#2a3a4a",fontSize:10}}>POC:${live["4h"]?.poc} VAH:${live["4h"]?.vah} VAL:${live["4h"]?.val}</span>
+                  {live["4h"]?.springDetected && <span style={{color:C.yellow,fontSize:10,fontWeight:700}}>⚡ SPRING!</span>}
+                  {live["4h"]?.bullishDiv && <span style={{color:C.green,fontSize:10,fontWeight:700}}>📈 BULL DIV</span>}
+                  {live["4h"]?.bearishDiv && <span style={{color:C.red,fontSize:10,fontWeight:700}}>📉 BEAR DIV</span>}
                 </div>
-              ))}
+              )}
+              <button disabled={running||!proxyOk} onClick={()=>generate(false)} style={{
+                background:proxyOk?`linear-gradient(135deg,${C.purple},#5a0090)`:"#1a1020",
+                border:`2px solid ${proxyOk?C.purple:"#3a2a4a"}`,
+                color:proxyOk?"white":"#3a2a5a",padding:"16px 40px",fontSize:22,letterSpacing:3,
+                cursor:running||!proxyOk?"not-allowed":"pointer",borderRadius:6,width:"100%",fontWeight:700,
+                boxShadow:proxyOk&&!running?`0 0 24px ${C.purple}55`:"none"
+              }}>
+                {running?"⏳ ANALYSIERT...":!proxyOk?"🔧 PROXY URL EINTRAGEN":"⚡ AUTO-ANALYSE STARTEN"}
+              </button>
+              <div style={{fontSize:9,color:"#3a2a5a",marginTop:6}}>{proxyOk?"lädt Daten + berechnet alle 10 Filter · ~10 Sek":"↑ Cloudflare Worker URL einmalig eintragen (Guide Tab)"}</div>
             </div>
-
-            {/* ADVANCED (collapsible) */}
-            <details style={{marginBottom:10}}>
-              <summary style={{cursor:"pointer",background:C.midbg,border:`1px solid #2a1a4a`,borderRadius:6,padding:"10px 14px",fontSize:10,color:C.purple,fontWeight:700,letterSpacing:1,listStyle:"none",display:"flex",justifyContent:"space-between"}}>
-                <span>🔍 ERWEITERT: Liquidität + Volume Profile (optional — erhöht Präzision)</span>
-                <span>▼</span>
+            <details>
+              <summary style={{cursor:"pointer",background:C.midbg,border:`1px solid ${C.border}`,borderRadius:6,padding:"10px 14px",fontSize:10,color:"#3a4a5a",letterSpacing:1,listStyle:"none",display:"flex",justifyContent:"space-between",userSelect:"none"}}>
+                <span>➕ EIGENE CHART-NOTIZEN HINZUFÜGEN (optional)</span><span style={{color:"#2a3a4a"}}>▼</span>
               </summary>
-              <div style={{background:C.midbg,border:`1px solid #2a1a4a`,borderTopLeftRadius:0,borderTopRightRadius:0,borderRadius:"0 0 6px 6px",padding:14}}>
-
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-                  <div>
-                    <Label col={C.purple}>EQUAL HIGHS (EQH)</Label>
-                    <div style={{fontSize:9,color:"#3a2a6a",marginBottom:4}}>Zwei gleiche Hochs? Stop-Cluster oben</div>
-                    <input style={{width:"100%"}} placeholder="z.B. $72.800" value={eqH} onChange={e=>setEqH(e.target.value)}/>
+              <div style={{background:C.midbg,border:`1px solid ${C.border}`,borderTop:"none",borderRadius:"0 0 6px 6px",padding:14}}>
+                <div style={{fontSize:10,color:"#3a5a7a",marginBottom:10}}>Ergänzt die automatischen Daten — Stichworte reichen</div>
+                {[["4H",C.blue,"z.B. Phase C Spring",f4h,setF4h],["1H","#b39ddb","z.B. CHoCH $71.200",f1h,setF1h],["15M",C.green,"z.B. Dark Red→Light Red",f15m,setF15m]].map(([l,col,ph,val,set])=>(
+                  <div key={l} style={{marginBottom:8,display:"flex",gap:10,alignItems:"center"}}>
+                    <span style={{fontSize:16,fontWeight:700,color:col,minWidth:32}}>{l}</span>
+                    <input style={{flex:1}} placeholder={ph} value={val} onChange={e=>set(e.target.value)}/>
                   </div>
-                  <div>
-                    <Label col={C.purple}>EQUAL LOWS (EQL) — Spring Zone</Label>
-                    <div style={{fontSize:9,color:"#3a2a6a",marginBottom:4}}>Zwei gleiche Tiefs? Beste Spring-Zone</div>
-                    <input style={{width:"100%"}} placeholder="z.B. $69.400" value={eqL} onChange={e=>setEqL(e.target.value)}/>
-                  </div>
-                  <div>
-                    <Label col={C.purple}>FAIR VALUE GAP (FVG)</Label>
-                    <div style={{fontSize:9,color:"#3a2a6a",marginBottom:4}}>Preislücke die gefüllt werden muss</div>
-                    <input style={{width:"100%"}} placeholder="z.B. $70.100–$70.800 auf 4H" value={fvg} onChange={e=>setFvg(e.target.value)}/>
-                  </div>
-                  <div>
-                    <Label col={C.purple}>ORDERBLOCK (OB)</Label>
-                    <div style={{fontSize:9,color:"#3a2a6a",marginBottom:4}}>Letzte rote Kerze vor starkem Move</div>
-                    <input style={{width:"100%"}} placeholder="z.B. $69.800–$70.200" value={ob} onChange={e=>setOb(e.target.value)}/>
-                  </div>
-                </div>
-
-                <Label col="#00b84a">VOLUME PROFILE — TradingView: Indicators → "Volume Profile Fixed Range"</Label>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:10}}>
-                  {[["POC","Längste Linie",poc,setPoc],["VAH","Obere 70% Grenze",vah,setVah],["VAL","Untere 70% Grenze",val_,setVal]].map(([l,sub,v,s])=>(
-                    <div key={l}>
-                      <Label col="#00b84a">{l}</Label>
-                      <div style={{fontSize:9,color:"#1a3a2a",marginBottom:3}}>{sub}</div>
-                      <input style={{width:"100%"}} placeholder="Preis" value={v} onChange={e=>s(e.target.value)}/>
-                    </div>
-                  ))}
-                </div>
-
-                <Label col={C.yellow}>OFFENE POSITIONEN (Korrelationscheck)</Label>
-                <input style={{width:"100%"}} placeholder="z.B. 'Long BTCUSDT 0.1 seit $70.500' — leer wenn keine" value={pos} onChange={e=>setPos(e.target.value)}/>
+                ))}
+                <input style={{width:"100%",marginTop:8}} placeholder="Offene Positionen (Korrelation)" value={pos} onChange={e=>setPos(e.target.value)}/>
+                <button disabled={running} onClick={()=>generate(true)} style={{background:"transparent",border:`1px solid ${C.purple}`,color:"#b39ddb",padding:"10px 20px",fontSize:11,letterSpacing:1,marginTop:10,width:"100%",cursor:"pointer"}}>
+                  ⚡ ANALYSE MIT MEINEN NOTIZEN
+                </button>
               </div>
             </details>
-
-            {error && <div style={{background:"#1a0707",border:`1px solid ${C.red}`,borderRadius:4,padding:"10px 14px",fontSize:11,color:"#ff6b6b",marginBottom:12}}>{error}</div>}
-
-            <button disabled={running||!proxyOk} onClick={generate} style={{
-              background:"linear-gradient(135deg,#2a0a3a,#1a0528)",border:`1px solid ${proxyOk?C.purple:"#3a2a4a"}`,
-              color:proxyOk?"#b39ddb":"#3a2a5a",padding:"14px 24px",fontSize:18,letterSpacing:3,
-              cursor:running||!proxyOk?"not-allowed":"pointer",borderRadius:4,width:"100%",
-              opacity:running?0.6:1,fontWeight:700
-            }}>
-              {running?"⏳ ANALYSIERT 10 FILTER...":!proxyOk?"🔧 ZUERST PROXY EINRICHTEN":"⚡ SIGNAL GENERIEREN"}
-            </button>
-            {!proxyOk && <div style={{textAlign:"center",fontSize:10,color:"#ff6b6b",marginTop:6}}>
-              ↑ Cloudflare Worker URL eintragen (oben) dann funktioniert alles
-            </div>}
+            {error && <div style={{background:"#1a0707",border:`1px solid ${C.red}`,borderRadius:4,padding:"10px 14px",fontSize:11,color:"#ff6b6b",marginTop:12}}>{error}</div>}
           </div>
+        )}
+
         )}
 
         {/* ═══════════════ RESULT TAB ═══════════════ */}
