@@ -1,29 +1,774 @@
-import React from 'react'
-import ReactDOM from 'react-dom/client'
-import App from './main.jsx'
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Wyckoff Signal Bot</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#07090c;color:#b8ccd8;font-family:'Courier New',monospace;font-size:13px}
+    ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:#1a2530;border-radius:2px}
+    input,select,textarea{font-family:inherit;outline:none;background:#0a0f15;border:1px solid #1a2530;color:#b8ccd8;border-radius:3px;padding:7px 10px;font-size:12px}
+    textarea{resize:vertical;line-height:1.6}
+    button{font-family:inherit;cursor:pointer;border-radius:3px;font-weight:700;letter-spacing:1px}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}.pulse{animation:pulse 1.4s infinite}
+    @keyframes si{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}.si{animation:si 0.3s ease}
+    select option{background:#0a0f15}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef} = React;
 
-ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-)
-```
+// ─── CONFIG ────────────────────────────────────────────────────────────────
+// Deine Cloudflare Worker URL — einmalig hier eintragen und speichern
+const DEFAULT_PROXY = localStorage.getItem("proxyUrl") || "";
 
-6. **"Commit changes"** klicken
+const PAIRS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","LINKUSDT",
+               "AVAXUSDT","BTCUSDC","ETHUSDC","BNBUSDC","ETHBTC","SOLBTC","BNBBTC"];
 
----
+const SYSTEM = `You are an elite crypto trading analyst using the Wyckoff Method + Smart Money Concepts + Volume Profile + 4C MACD.
 
-**Datei 2 — `index.html` aktualisieren:**
+STRATEGY - 10 FILTERS:
+1. HTF Bias (Weekly/Monthly MACD): Only trade WITH the trend
+2. Wyckoff Phase (4H): SC/AR/ST/Spring/LPS/SOS/BU or Distribution equivalent
+3. Liquidity: Equal Highs/Lows swept? FVG filled? Orderblock holding?
+4. Volume Profile: Entry at VAL or POC? Target VAH?
+5. 4C MACD Divergence: Price lower low + MACD higher low = bullish. Entry on Dark Red→Light Red/Green shift
+6. 1H Structure: CHoCH or BOS confirmed?
+7. 15M Trigger: Impulse+Correction done? MACD color changed?
+8. Session: London 07-10 UTC or NY 12:30-16 UTC = optimal. Dead zone = -2 confidence
+9. Correlation: Max 2 correlated open positions
+10. Risk: Confidence 8-10=1.5%, 6-7=1.0%, <6=skip
 
-1. Geh zurück zum Hauptordner
-2. Klick auf `index.html`
-3. Klick das **Stift-Symbol** (Edit)
-4. Ändere diese eine Zeile:
+GLOSSARY (always explain terms in plain German):
+SC=Selling Climax (Panik-Ausverkauf), AR=Automatic Rally (erster Bounce), ST=Secondary Test, Spring=falscher Ausbruch nach unten (bester Long-Entry), LPS=Last Point of Support, SOS=Sign of Strength (Ausbruch mit Volumen), BU=Back-Up (Retest), CHoCH=Change of Character, BOS=Break of Structure, FVG=Fair Value Gap (Preislücke die gefüllt werden muss), OB=Orderblock, POC=meistgehandelter Preis, VAH/VAL=Value Area Grenzen
 
-**Alt:**
-```
-<script type="module" src="/src/main.jsx"></script>
-```
-**Neu:**
-```
-<script type="module" src="/src/index.jsx"></script>
+RULE: If 4H and 15M don't align → NO SETUP. Always explain every term used.
+
+Respond ONLY with valid JSON (no markdown):
+{"signal":"LONG or SHORT or NO SETUP","no_setup_reason":null,"filters_passed":0,"bias_4h":"","bias_1h":"","wyckoff_phase":"","wyckoff_event":"","wyckoff_plain":"plain German explanation","macd_analysis":"","liquidity_note":"","volume_profile_note":"","session_ok":true,"correlation_warning":null,"entry":"","stop":"","stop_reason":"","tp1":"","tp1_reason":"","tp2":"","tp2_reason":"","rrr":"","risk_pct":"","confidence":0,"invalidation":"","narrative":"3-4 Sätze auf Deutsch, alle Fachbegriffe erklärt"}`;
+
+// ─── HELPERS ───────────────────────────────────────────────────────────────
+const ls = {
+  get:(k)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):null}catch{return null}},
+  set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}}
+};
+
+const session=()=>{
+  const h=new Date().getUTCHours();
+  if(h>=7&&h<10)  return{txt:"🟢 LONDON OPEN",ok:true};
+  if(h>=10&&h<12) return{txt:"🔵 LONDON",ok:true};
+  if(h>=12&&h<16) return{txt:"🟢 NEW YORK",ok:true};
+  if(h>=16&&h<21) return{txt:"🔵 NY LATE",ok:true};
+  return{txt:"🔴 DEAD ZONE",ok:false};
+};
+
+const ema=(arr,p)=>arr.reduce((a,v,i)=>i===0?v:v*(2/(p+1))+a*(1-2/(p+1)),arr[0]);
+
+const summarize=(raw)=>{
+  if(!raw||raw.length<10)return null;
+  const cl=raw.map(c=>+c[4]),hi=raw.map(c=>+c[2]),lo=raw.map(c=>+c[3]),vo=raw.map(c=>+c[5]),op=raw.map(c=>+c[1]);
+  const n=cl.length;
+  const avgV=vo.reduce((a,b)=>a+b,0)/vo.length;
+
+  // MACD 4C calculation
+  const ema12=ema(cl,12), ema26=ema(cl,26);
+  const macdLine=ema12-ema26;
+  // Compute full MACD series for last 30 bars
+  const macdSeries=cl.map((_,i)=>{
+    if(i<26)return 0;
+    const slice=cl.slice(0,i+1);
+    return ema(slice,12)-ema(slice,26);
+  });
+  const signalSeries=macdSeries.map((_,i)=>{
+    if(i<35)return 0;
+    return ema(macdSeries.slice(0,i+1),9);
+  });
+  const hist=macdSeries.map((m,i)=>m-signalSeries[i]);
+  const lastHist=hist[n-1], prevHist=hist[n-2], prev2Hist=hist[n-3];
+
+  // 4C MACD color
+  let macdColor="Dark Red";
+  if(lastHist>0 && lastHist>prevHist) macdColor="Dark Green";
+  else if(lastHist>0 && lastHist<=prevHist) macdColor="Light Green";
+  else if(lastHist<0 && lastHist>prevHist) macdColor="Light Red";
+  else macdColor="Dark Red";
+
+  // Detect divergence
+  const recentLows=lo.slice(-20), recentHighs=hi.slice(-20);
+  const recentHistLows=hist.slice(-20), recentHistHighs=hist.slice(-20);
+  const priceMakingLL=lo[n-1]<Math.min(...lo.slice(-10,-1));
+  const macdMakingHL=hist[n-1]>Math.min(...hist.slice(-10,-1));
+  const bullishDiv=priceMakingLL&&macdMakingHL&&lastHist<0;
+  const priceMakingHH=hi[n-1]>Math.max(...hi.slice(-10,-1));
+  const macdMakingLH=hist[n-1]<Math.max(...hist.slice(-10,-1));
+  const bearishDiv=priceMakingHH&&macdMakingLH&&lastHist>0;
+
+  // Wyckoff structure detection
+  const h60=Math.max(...hi.slice(-60)), l60=Math.min(...lo.slice(-60));
+  const h20=Math.max(...hi.slice(-20)), l20=Math.min(...lo.slice(-20));
+  const h5=Math.max(...hi.slice(-5)),   l5=Math.min(...lo.slice(-5));
+  const rangePos=(cl[n-1]-l60)/(h60-l60||1); // 0=bottom 1=top
+
+  // Detect SC/Spring: large volume + price near 60-period low + reversal
+  const maxVol=Math.max(...vo.slice(-60));
+  const scCandle=vo.slice(-60).findIndex(v=>v>avgV*2.5 && lo[n-60+vo.slice(-60).indexOf(v)]<l60*1.02);
+  const nearRangeBottom=rangePos<0.3;
+  const nearRangeTop=rangePos>0.7;
+  const springDetected=nearRangeBottom && cl[n-1]>op[n-1] && lo[n-1]<l20 && vo[n-1]>avgV*1.5;
+
+  // BOS/CHoCH detection (simplified)
+  const swingHigh=Math.max(...hi.slice(-10));
+  const swingLow=Math.min(...lo.slice(-10));
+  const prevSwingHigh=Math.max(...hi.slice(-20,-10));
+  const prevSwingLow=Math.min(...lo.slice(-20,-10));
+  const bosUp=cl[n-1]>prevSwingHigh;
+  const bosDown=cl[n-1]<prevSwingLow;
+
+  // Equal Highs/Lows detection (within 0.3%)
+  const tolerance=0.003;
+  let eqHighs=null, eqLows=null;
+  for(let i=n-20;i<n-3;i++){
+    if(Math.abs(hi[i]-hi[n-1])/hi[n-1]<tolerance && hi[i]>hi[n-2]) eqHighs=hi[i].toFixed(2);
+    if(Math.abs(lo[i]-lo[n-1])/lo[n-1]<tolerance && lo[i]<lo[n-2]) eqLows=lo[i].toFixed(2);
+  }
+
+  // FVG detection (last 30 candles)
+  let fvg=null;
+  for(let i=n-30;i<n-2;i++){
+    const gap=lo[i+2]-hi[i];
+    if(gap>0 && gap/cl[i]>0.002){ fvg={low:hi[i].toFixed(2),high:lo[i+2].toFixed(2),dir:"bullish"}; }
+    const gap2=lo[i]-hi[i+2];
+    if(gap2>0 && gap2/cl[i]>0.002){ fvg={low:hi[i+2].toFixed(2),high:lo[i].toFixed(2),dir:"bearish"}; }
+  }
+
+  // Volume profile approximation using price buckets
+  const priceRange=h60-l60, buckets=20;
+  const volProfile=Array(buckets).fill(0);
+  for(let i=n-60;i<n;i++){
+    const bucket=Math.min(buckets-1,Math.floor((cl[i]-l60)/priceRange*buckets));
+    volProfile[bucket]+=vo[i];
+  }
+  const pocBucket=volProfile.indexOf(Math.max(...volProfile));
+  const poc=(l60+pocBucket/buckets*priceRange).toFixed(2);
+  // VAH/VAL: find 70% volume range
+  const totalVol=volProfile.reduce((a,b)=>a+b,0);
+  let cumVol=0, vahBucket=pocBucket, valBucket=pocBucket;
+  let up=pocBucket+1, dn=pocBucket-1;
+  cumVol=volProfile[pocBucket];
+  while(cumVol/totalVol<0.7 && (up<buckets||dn>=0)){
+    const upV=up<buckets?volProfile[up]:0;
+    const dnV=dn>=0?volProfile[dn]:0;
+    if(upV>=dnV&&up<buckets){cumVol+=upV;vahBucket=up;up++;}
+    else if(dn>=0){cumVol+=dnV;valBucket=dn;dn--;}
+    else break;
+  }
+  const vah=(l60+vahBucket/buckets*priceRange).toFixed(2);
+  const val=(l60+valBucket/buckets*priceRange).toFixed(2);
+
+  // Trend: higher highs/lows or lower highs/lows
+  const trend=h20>prevSwingHigh&&l20>prevSwingLow?"Bullish":h20<prevSwingHigh&&l20<prevSwingLow?"Bearish":"Neutral";
+
+  return{
+    price:cl[n-1].toFixed(2),
+    h20:h20.toFixed(2), l20:l20.toFixed(2),
+    h60:h60.toFixed(2), l60:l60.toFixed(2),
+    volRatio:(vo[n-1]/avgV).toFixed(1),
+    macdValue:macdLine.toFixed(4),
+    macdColor, bullishDiv, bearishDiv,
+    springDetected, nearRangeBottom, nearRangeTop,
+    bosUp, bosDown, trend,
+    eqHighs, eqLows, fvg,
+    poc, vah, val,
+    rangePos:rangePos.toFixed(2),
+    lastClose:cl[n-1], lastVol:vo[n-1], avgVol:avgV.toFixed(0)
+  };
+};
+
+const C={
+  green:"#00e676",red:"#ff1744",yellow:"#ffab00",purple:"#7c4dff",
+  blue:"#4a9ad4",darkbg:"#060a0d",midbg:"#090d12",border:"#1a2530"
+};
+
+const Box=({col,children,style={}})=>(
+  <div style={{background:C.darkbg,border:`1px solid ${col||C.border}`,borderRadius:4,padding:"10px 12px",...style}}>
+    {children}
+  </div>
+);
+const Label=({children,col})=>(
+  <div style={{fontSize:8,color:col||"#2a3a4a",letterSpacing:2,marginBottom:3,fontWeight:700}}>
+    {children}
+  </div>
+);
+
+// ─── MAIN APP ──────────────────────────────────────────────────────────────
+function App(){
+  const [proxy,setProxy]   = useState(DEFAULT_PROXY);
+  const [proxyOk,setPOk]   = useState(!!DEFAULT_PROXY);
+  const [pair,setPair]     = useState(ls.get("pair")||"BTCUSDT");
+  const [live,setLive]     = useState(null);
+  const [loading,setLoad]  = useState(false);
+  const [running,setRun]   = useState(false);
+  const [result,setRes]    = useState(null);
+  const [error,setErr]     = useState("");
+  const [tab,setTab]       = useState("input");
+  const [hist,setHist]     = useState(ls.get("hist")||[]);
+  const [autoLoad,setAuto] = useState(ls.get("autoLoad")!==false);
+
+  // Chart inputs
+  const [f4h,setF4h]   = useState("");
+  const [f1h,setF1h]   = useState("");
+  const [f15m,setF15m] = useState("");
+  const [eqH,setEqH]   = useState("");
+  const [eqL,setEqL]   = useState("");
+  const [fvg,setFvg]   = useState("");
+  const [ob,setOb]     = useState("");
+  const [poc,setPoc]   = useState("");
+  const [vah,setVah]   = useState("");
+  const [val_,setVal]  = useState("");
+  const [pos,setPos]   = useState("");
+
+  const sess = session();
+
+  // Auto-load on pair change
+  useEffect(()=>{
+    if(proxyOk && autoLoad){ loadLive(); }
+  },[pair,proxyOk]);
+
+  const saveProxy=()=>{
+    const p=proxy.trim().replace(/\/$/,"");
+    if(!p)return;
+    localStorage.setItem("proxyUrl",p);
+    setProxy(p); setPOk(true); setErr("");
+  };
+
+  const loadLive=async()=>{
+    if(!proxy)return;
+    setLoad(true); setErr("");
+    try{
+      const base=proxy.trim().replace(/\/$/,"");
+      const [r4,r1,r15]=await Promise.all(
+        ["4h","1h","15m"].map(iv=>
+          fetch(`${base}/?symbol=${pair}&interval=${iv}&limit=180`).then(r=>r.json())
+        )
+      );
+      setLive({"4h":summarize(r4),"1h":summarize(r1),"15m":summarize(r15)});
+    }catch(e){setErr("Live-Daten Fehler: "+e.message);}
+    setLoad(false);
+  };
+
+  const generate=async(manualMode=false)=>{
+    if(!proxy){setErr("Proxy URL eintragen"); return;}
+    setRun(true); setRes(null); setErr(""); setTab("result");
+
+    // Always fetch fresh live data first
+    let freshLive=live;
+    if(!freshLive){
+      try{
+        const base=proxy.trim().replace(/\/$/,"");
+        const [r4,r1,r15]=await Promise.all(
+          ["4h","1h","15m"].map(iv=>
+            fetch(`${base}/?symbol=${pair}&interval=${iv}&limit=180`).then(r=>r.json())
+          )
+        );
+        freshLive={"4h":summarize(r4),"1h":summarize(r1),"15m":summarize(r15)};
+        setLive(freshLive);
+      }catch(e){setErr("Live-Daten Fehler: "+e.message);setRun(false);return;}
+    }
+
+    const d4=freshLive["4h"], d1=freshLive["1h"], d15=freshLive["15m"];
+
+    // Build rich automatic context
+    const autoCtx=`
+LIVE BINANCE DATA — ${pair} — Auto-computed from 180 candles each timeframe:
+
+4H ANALYSIS:
+  Price: $${d4?.price} | 60-bar range: $${d4?.l60}–$${d4?.h60} | Range position: ${(+d4?.rangePos*100).toFixed(0)}% from bottom
+  20-bar High/Low: $${d4?.h20}/$${d4?.l20}
+  Trend: ${d4?.trend} | BOS Up: ${d4?.bosUp} | BOS Down: ${d4?.bosDown}
+  MACD 4C Color: ${d4?.macdColor} (value: ${d4?.macdValue})
+  Bullish Divergence: ${d4?.bullishDiv} | Bearish Divergence: ${d4?.bearishDiv}
+  Spring Detected: ${d4?.springDetected} | Near Bottom: ${d4?.nearRangeBottom} | Near Top: ${d4?.nearRangeTop}
+  Volume: ${d4?.volRatio}x avg
+  Equal Highs: ${d4?.eqHighs||"None"} | Equal Lows: ${d4?.eqLows||"None"}
+  FVG: ${d4?.fvg?`${d4.fvg.dir} gap $${d4.fvg.low}–$${d4.fvg.high}`:"None detected"}
+  Volume Profile → POC: $${d4?.poc} | VAH: $${d4?.vah} | VAL: $${d4?.val}
+
+1H ANALYSIS:
+  Price: $${d1?.price} | Trend: ${d1?.trend} | BOS Up: ${d1?.bosUp} | BOS Down: ${d1?.bosDown}
+  MACD 4C Color: ${d1?.macdColor} | Bullish Div: ${d1?.bullishDiv} | Bearish Div: ${d1?.bearishDiv}
+  Volume: ${d1?.volRatio}x avg
+  Equal Highs: ${d1?.eqHighs||"None"} | Equal Lows: ${d1?.eqLows||"None"}
+
+15M ANALYSIS:
+  Price: $${d15?.price} | Trend: ${d15?.trend}
+  MACD 4C Color: ${d15?.macdColor} — THIS IS THE ENTRY TRIGGER
+  Bullish Div: ${d15?.bullishDiv} | Bearish Div: ${d15?.bearishDiv}
+  Volume: ${d15?.volRatio}x avg
+  Spring: ${d15?.springDetected}`;
+
+    // Add manual notes if provided
+    const manualCtx=manualMode&&(f4h||f1h||f15m)?`
+
+ADDITIONAL MANUAL OBSERVATIONS:
+4H notes: ${f4h||"—"}
+1H notes: ${f1h||"—"}
+15M notes: ${f15m||"—"}
+${eqH?`Equal Highs: ${eqH}`:""}${eqL?`\nEqual Lows: ${eqL}`:""}${fvg?`\nFVG: ${fvg}`:""}${ob?`\nOrderblock: ${ob}`:""}${poc?`\nPOC override: ${poc}`:""}${pos?`\nOpen positions: ${pos}`:""}`:""
+
+    const msg=`Fully auto-analyze ${pair} using all 10 filters. All data is computed directly from 180 live Binance candles.
+
+SESSION: ${sess.txt} (UTC ${new Date().getUTCHours()}h)
+${autoCtx}${manualCtx}
+
+Based ONLY on the computed data above, apply all 10 filters and generate the signal. 
+The MACD 4C colors are already computed — use them directly.
+The Volume Profile POC/VAH/VAL are already computed — use them for targets.
+Equal Highs/Lows and FVGs are already detected — use them for liquidity analysis.
+Signal only if 6+ filters pass. Be specific with price levels.`;
+
+    try{
+      const base=proxy.trim().replace(/\/$/,"");
+      const res=await fetch(`${base}/claude`,{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          model:"claude-sonnet-4-20250514",
+          max_tokens:2000,
+          system:SYSTEM,
+          messages:[{role:"user",content:msg}]
+        })
+      });
+      if(!res.ok){const t=await res.text();throw new Error(`${res.status}: ${t.slice(0,300)}`);}
+      const data=await res.json();
+      const raw=data.content?.map(b=>b.text||"").join("").replace(/```json|```/g,"").trim();
+      const m=raw?.match(/\{[\s\S]*\}/);
+      if(!m) throw new Error("Kein JSON in Antwort");
+      const parsed=JSON.parse(m[0]);
+      setRes(parsed);
+      const newH=[{pair,result:parsed,ts:new Date().toLocaleTimeString("de-AT"),price:d4?.price},...hist.slice(0,4)];
+      setHist(newH); ls.set("hist",newH);
+    }catch(e){setErr("Fehler: "+e.message); setTab("input");}
+    setRun(false);
+  };
+
+  const sigStyle=(s)=>({
+    LONG: {bg:"#071a0f",border:C.green,text:C.green},
+    SHORT:{bg:"#1a0707",border:C.red,  text:C.red},
+  }[s]||{bg:"#130e00",border:C.yellow,text:C.yellow});
+
+  const confColor=(c)=>c>=8?C.green:c>=6?C.yellow:"#ff6d00";
+
+  // ── RENDER ──
+  return(
+    <div style={{minHeight:"100vh",background:"#07090c"}}>
+
+      {/* TOP BAR */}
+      <div style={{background:C.midbg,borderBottom:`1px solid ${C.border}`,padding:"10px 16px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",position:"sticky",top:0,zIndex:100}}>
+        <span style={{fontSize:16,fontWeight:700,color:C.purple,letterSpacing:3}}>⚡ SIGNAL BOT</span>
+        <span style={{fontSize:8,color:"#2a2a5a",letterSpacing:2,display:"none md:flex"}}>WYCKOFF · SMC · VOLUME PROFILE · 4C MACD · 10 FILTER</span>
+        <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+          {live && <span style={{fontSize:9,padding:"2px 8px",borderRadius:3,background:"#071a0f",border:`1px solid ${C.green}`,color:C.green,fontWeight:700}}>📡 {pair} · ${live["4h"]?.price}</span>}
+          <span style={{fontSize:9,padding:"2px 8px",borderRadius:3,background:sess.ok?"#071a0f":"#1a0707",border:`1px solid ${sess.ok?C.green:C.red}`,color:sess.ok?C.green:C.red,fontWeight:700}}>{sess.txt}</span>
+          {proxyOk && <span style={{fontSize:9,padding:"2px 8px",borderRadius:3,background:"#0a1520",border:`1px solid ${C.blue}`,color:C.blue}}>🔧 PROXY ✓</span>}
+        </div>
+      </div>
+
+      {/* TABS */}
+      <div style={{display:"flex",background:"#080b0f",borderBottom:`1px solid ${C.border}`}}>
+        {[["input","📋 EINGABE"],["result","⚡ SIGNAL"],["guide","📚 GUIDE"]].map(([id,l])=>(
+          <button key={id} onClick={()=>setTab(id)} style={{
+            padding:"10px 18px",fontSize:10,letterSpacing:1,
+            borderBottom:tab===id?`2px solid ${C.purple}`:"2px solid transparent",
+            color:tab===id?"#b39ddb":"#2a4a6a",background:"transparent",
+            border:"none",borderBottom:tab===id?`2px solid ${C.purple}`:"2px solid transparent",
+          }}>{l}{id==="result"&&result&&!running?" ●":""}</button>
+        ))}
+      </div>
+
+      <div style={{padding:16,maxWidth:860,margin:"0 auto"}}>
+
+        {/* ── PROXY SETUP ── */}
+        {!proxyOk && (
+          <div style={{background:"#0a0f15",border:`1px solid ${C.blue}`,borderRadius:6,padding:14,marginBottom:14}}>
+            <Label col={C.blue}>🔧 EINMALIG: CLOUDFLARE WORKER URL EINTRAGEN</Label>
+            <div style={{fontSize:11,color:"#4a6a8a",marginBottom:8,lineHeight:1.6}}>
+              Damit Live-Daten UND Signal-Generierung funktionieren, brauchst du deinen Cloudflare Worker.<br/>
+              Den Code findest du im 📚 GUIDE Tab.
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <input style={{flex:1}} placeholder="https://binance-proxy.mail-schlabitz.workers.dev"
+                value={proxy} onChange={e=>setProxy(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&saveProxy()}/>
+              <button onClick={saveProxy} style={{background:C.blue+"22",border:`1px solid ${C.blue}`,color:C.blue,padding:"7px 18px",fontSize:10,letterSpacing:1}}>
+                SPEICHERN ✓
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ═══════════════ INPUT TAB ═══════════════ */}
+        {tab==="input" && (
+          <div className="si">
+            <div style={{background:C.midbg,border:`2px solid ${C.purple}`,borderRadius:8,padding:20,marginBottom:14,textAlign:"center"}}>
+              <div style={{fontSize:11,color:"#b39ddb",letterSpacing:2,marginBottom:8,fontWeight:700}}>VOLLAUTOMATISCHE ANALYSE</div>
+              <div style={{fontSize:12,color:"#5a4a7a",marginBottom:16,lineHeight:1.8}}>
+                Pair wählen → Button klicken → fertig.<br/>
+                <span style={{color:"#7c4dff"}}>Wyckoff · MACD 4C · FVG · Equal Highs/Lows · Volume Profile · POC/VAH/VAL</span><br/>
+                <span style={{color:"#3a3060",fontSize:10}}>alles automatisch aus 180 echten Binance-Kerzen</span>
+              </div>
+              <div style={{display:"flex",justifyContent:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+                {["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ETHBTC"].map(p=>(
+                  <button key={p} onClick={()=>{setPair(p);ls.set("pair",p);setLive(null);}}
+                    style={{background:pair===p?C.purple+"44":"transparent",border:`1px solid ${pair===p?C.purple:"#2a2040"}`,color:pair===p?"#b39ddb":"#3a3060",padding:"6px 14px",fontSize:11,borderRadius:20,cursor:"pointer"}}>
+                    {p}
+                  </button>
+                ))}
+                <select style={{background:"#0a0f15",border:"1px solid #2a2040",color:"#5a4a7a",padding:"6px 10px",borderRadius:20,fontSize:11}}
+                  onChange={e=>{if(e.target.value){setPair(e.target.value);ls.set("pair",e.target.value);setLive(null);}}}>
+                  <option value="">+ mehr</option>
+                  {["LINKUSDT","AVAXUSDT","BTCUSDC","ETHUSDC","BNBUSDC","SOLBTC","BNBBTC"].map(p=><option key={p}>{p}</option>)}
+                </select>
+              </div>
+              {live && (
+                <div style={{background:"#071a0f",border:`1px solid ${C.green}44`,borderRadius:6,padding:"10px 16px",marginBottom:14,display:"inline-flex",gap:12,flexWrap:"wrap",alignItems:"center"}}>
+                  <span style={{color:C.green,fontSize:18,fontWeight:700}}>💰 ${live["4h"]?.price}</span>
+                  <span style={{color:"#3a5a7a",fontSize:10}}>MACD: <span style={{color:live["4h"]?.macdColor?.includes("Green")?C.green:live["4h"]?.macdColor==="Light Red"?C.yellow:C.red,fontWeight:700}}>{live["4h"]?.macdColor}</span></span>
+                  <span style={{color:"#2a3a4a",fontSize:10}}>POC:${live["4h"]?.poc} VAH:${live["4h"]?.vah} VAL:${live["4h"]?.val}</span>
+                  {live["4h"]?.springDetected && <span style={{color:C.yellow,fontSize:10,fontWeight:700}}>⚡ SPRING!</span>}
+                  {live["4h"]?.bullishDiv && <span style={{color:C.green,fontSize:10,fontWeight:700}}>📈 BULL DIV</span>}
+                  {live["4h"]?.bearishDiv && <span style={{color:C.red,fontSize:10,fontWeight:700}}>📉 BEAR DIV</span>}
+                </div>
+              )}
+              <button disabled={running||!proxyOk} onClick={()=>generate(false)} style={{
+                background:proxyOk?`linear-gradient(135deg,${C.purple},#5a0090)`:"#1a1020",
+                border:`2px solid ${proxyOk?C.purple:"#3a2a4a"}`,
+                color:proxyOk?"white":"#3a2a5a",padding:"16px 40px",fontSize:22,letterSpacing:3,
+                cursor:running||!proxyOk?"not-allowed":"pointer",borderRadius:6,width:"100%",fontWeight:700,
+                boxShadow:proxyOk&&!running?`0 0 24px ${C.purple}55`:"none"
+              }}>
+                {running?"⏳ ANALYSIERT...":!proxyOk?"🔧 PROXY URL EINTRAGEN":"⚡ AUTO-ANALYSE STARTEN"}
+              </button>
+              <div style={{fontSize:9,color:"#3a2a5a",marginTop:6}}>{proxyOk?"lädt Daten + berechnet alle 10 Filter · ~10 Sek":"↑ Cloudflare Worker URL einmalig eintragen (Guide Tab)"}</div>
+            </div>
+            <details>
+              <summary style={{cursor:"pointer",background:C.midbg,border:`1px solid ${C.border}`,borderRadius:6,padding:"10px 14px",fontSize:10,color:"#3a4a5a",letterSpacing:1,listStyle:"none",display:"flex",justifyContent:"space-between",userSelect:"none"}}>
+                <span>➕ EIGENE CHART-NOTIZEN HINZUFÜGEN (optional)</span><span style={{color:"#2a3a4a"}}>▼</span>
+              </summary>
+              <div style={{background:C.midbg,border:`1px solid ${C.border}`,borderTop:"none",borderRadius:"0 0 6px 6px",padding:14}}>
+                <div style={{fontSize:10,color:"#3a5a7a",marginBottom:10}}>Ergänzt die automatischen Daten — Stichworte reichen</div>
+                {[["4H",C.blue,"z.B. Phase C Spring",f4h,setF4h],["1H","#b39ddb","z.B. CHoCH $71.200",f1h,setF1h],["15M",C.green,"z.B. Dark Red→Light Red",f15m,setF15m]].map(([l,col,ph,val,set])=>(
+                  <div key={l} style={{marginBottom:8,display:"flex",gap:10,alignItems:"center"}}>
+                    <span style={{fontSize:16,fontWeight:700,color:col,minWidth:32}}>{l}</span>
+                    <input style={{flex:1}} placeholder={ph} value={val} onChange={e=>set(e.target.value)}/>
+                  </div>
+                ))}
+                <input style={{width:"100%",marginTop:8}} placeholder="Offene Positionen (Korrelation)" value={pos} onChange={e=>setPos(e.target.value)}/>
+                <button disabled={running} onClick={()=>generate(true)} style={{background:"transparent",border:`1px solid ${C.purple}`,color:"#b39ddb",padding:"10px 20px",fontSize:11,letterSpacing:1,marginTop:10,width:"100%",cursor:"pointer"}}>
+                  ⚡ ANALYSE MIT MEINEN NOTIZEN
+                </button>
+              </div>
+            </details>
+            {error && <div style={{background:"#1a0707",border:`1px solid ${C.red}`,borderRadius:4,padding:"10px 14px",fontSize:11,color:"#ff6b6b",marginTop:12}}>{error}</div>}
+          </div>
+        )}
+
+        )}
+
+        {/* ═══════════════ RESULT TAB ═══════════════ */}
+        {tab==="result" && (
+          <div>
+            {running && (
+              <div style={{textAlign:"center",padding:"60px 20px"}}>
+                <div className="pulse" style={{fontSize:18,fontWeight:700,color:C.purple,letterSpacing:3,marginBottom:20}}>
+                  ⚡ ANALYSIERT {pair}...
+                </div>
+                {["Filter 1-2: HTF Bias + Wyckoff Phase","Filter 3-4: Liquidität + Volume Profile","Filter 5-7: MACD + Timeframes","Filter 8-10: Session + Korrelation + Risk"].map((t,i)=>(
+                  <div key={i} style={{fontSize:10,color:"#2a2a5a",marginBottom:5}}>{t}</div>
+                ))}
+              </div>
+            )}
+
+            {!running && !result && (
+              <div style={{textAlign:"center",padding:"60px 20px"}}>
+                <div style={{fontSize:48,marginBottom:12}}>⚡</div>
+                <div style={{fontSize:10,letterSpacing:3,color:"#1a2a3a",marginBottom:16}}>NOCH KEIN SIGNAL</div>
+                <button onClick={()=>setTab("input")} style={{background:"transparent",border:`1px solid #3a5a7a`,color:"#3a5a7a",padding:"8px 20px",fontSize:10,letterSpacing:1}}>
+                  ← ZUR EINGABE
+                </button>
+              </div>
+            )}
+
+            {!running && result && (()=>{
+              const r=result;
+              const sk=["LONG","SHORT"].includes(r.signal)?r.signal:"NO SETUP";
+              const st=sigStyle(sk);
+              const noS=sk==="NO SETUP";
+              const conf=r.confidence||0;
+              const fp=r.filters_passed||0;
+              const cc=confColor(conf);
+              const fpc=fp>=8?C.green:fp>=6?C.yellow:C.red;
+
+              return(
+                <div className="si">
+                  {/* BIG SIGNAL CARD */}
+                  <div style={{background:st.bg,border:`2px solid ${st.border}`,borderRadius:8,padding:20,marginBottom:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12}}>
+                      <div>
+                        <div style={{fontSize:noS?18:52,fontWeight:700,color:st.text,letterSpacing:3,lineHeight:1,marginBottom:6}}>
+                          {noS?"⛔ "+r.signal:r.signal+" →"}
+                        </div>
+                        {!noS && <div style={{fontSize:20,color:"#c8d8e8",fontWeight:700}}>{r.entry}</div>}
+                        <div style={{fontSize:11,color:"#5a7a9a",marginTop:4}}>{pair} · {new Date().toLocaleTimeString("de-AT")}{live?` · Live $${live["4h"]?.price}`:""}</div>
+                        {r.no_setup_reason && <div style={{fontSize:12,color:C.yellow,marginTop:8,lineHeight:1.7,maxWidth:400}}>{r.no_setup_reason}</div>}
+                      </div>
+                      <div style={{display:"flex",gap:10}}>
+                        <div style={{textAlign:"center",background:C.darkbg,border:`2px solid ${fpc}`,borderRadius:6,padding:"10px 16px",minWidth:70}}>
+                          <div style={{fontSize:8,color:"#2a3a4a",letterSpacing:2,marginBottom:2}}>FILTER</div>
+                          <div style={{fontSize:36,fontWeight:700,color:fpc,lineHeight:1}}>{fp}</div>
+                          <div style={{fontSize:9,color:fpc}}>/ 10</div>
+                        </div>
+                        <div style={{textAlign:"center",background:C.darkbg,border:`2px solid ${cc}`,borderRadius:6,padding:"10px 16px",minWidth:70}}>
+                          <div style={{fontSize:8,color:"#2a3a4a",letterSpacing:2,marginBottom:2}}>KONFIDENZ</div>
+                          <div style={{fontSize:36,fontWeight:700,color:cc,lineHeight:1}}>{conf}</div>
+                          <div style={{fontSize:9,color:cc}}>/ 10 · {r.risk_pct}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {!noS && (
+                    <>
+                      {/* BIAS ROW */}
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:10}}>
+                        {[
+                          ["4H TREND",r.bias_4h,r.bias_4h==="Bullish"?C.green:r.bias_4h==="Bearish"?C.red:C.yellow],
+                          ["1H TREND",r.bias_1h,r.bias_1h==="Bullish"?C.green:r.bias_1h==="Bearish"?C.red:C.yellow],
+                          ["SESSION",r.session_ok?"OPTIMAL":"SCHLECHT",r.session_ok?C.green:C.red],
+                        ].map(([l,v,c])=>(
+                          <Box key={l} style={{textAlign:"center"}}>
+                            <Label>{l}</Label>
+                            <div style={{fontSize:12,color:c,fontWeight:700}}>{v}</div>
+                          </Box>
+                        ))}
+                      </div>
+
+                      {/* WYCKOFF */}
+                      <Box col="#1a2a4a" style={{marginBottom:10}}>
+                        <Label col={C.blue}>WYCKOFF PHASE</Label>
+                        <div style={{fontSize:14,color:"#7ec8f0",fontWeight:700,marginBottom:6}}>{r.wyckoff_phase} · {r.wyckoff_event}</div>
+                        <div style={{fontSize:11,color:"#4a6a8a",lineHeight:1.8}}>{r.wyckoff_plain}</div>
+                      </Box>
+
+                      {/* LEVELS - BIG CLEAR DISPLAY */}
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+                        <Box style={{gridColumn:"1/-1",background:"#071a0f",border:`1px solid ${C.green}`}}>
+                          <Label col={C.green}>ENTRY</Label>
+                          <div style={{fontSize:28,color:C.green,fontWeight:700}}>{r.entry}</div>
+                          <div style={{fontSize:10,color:"#3a5a7a",marginTop:3}}>{r.wyckoff_event}</div>
+                        </Box>
+                        <Box col="#2a1010">
+                          <Label col={C.red}>STOP LOSS</Label>
+                          <div style={{fontSize:22,color:C.red,fontWeight:700}}>{r.stop}</div>
+                          <div style={{fontSize:9,color:"#5a2020",marginTop:3,lineHeight:1.5}}>{r.stop_reason}</div>
+                        </Box>
+                        <Box style={{background:"#070f07",border:`1px solid ${C.green}44`}}>
+                          <Label col={C.green}>TARGET 1</Label>
+                          <div style={{fontSize:22,color:C.green,fontWeight:700}}>{r.tp1}</div>
+                          <div style={{fontSize:9,color:"#1a5a2a",marginTop:3}}>{r.tp1_reason}</div>
+                        </Box>
+                        <Box style={{gridColumn:"1/-1",display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,background:"transparent",border:"none",padding:0}}>
+                          <Box style={{textAlign:"center"}}>
+                            <Label>RISK / REWARD</Label>
+                            <div style={{fontSize:36,fontWeight:700,color:C.yellow,letterSpacing:2}}>{r.rrr}</div>
+                          </Box>
+                          <Box style={{background:"#070f07",border:`1px solid ${C.green}44`}}>
+                            <Label col="#00b84a">TARGET 2</Label>
+                            <div style={{fontSize:22,color:"#00b84a",fontWeight:700}}>{r.tp2}</div>
+                            <div style={{fontSize:9,color:"#1a5a2a",marginTop:3}}>{r.tp2_reason}</div>
+                          </Box>
+                        </Box>
+                      </div>
+
+                      {/* ANALYSIS */}
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+                        <Box col="#2a2040">
+                          <Label col="#b39ddb">4C MACD</Label>
+                          <div style={{fontSize:11,color:"#9a7acc",lineHeight:1.7}}>{r.macd_analysis}</div>
+                        </Box>
+                        <Box col="#2a1a4a">
+                          <Label col={C.purple}>LIQUIDITÄT</Label>
+                          <div style={{fontSize:11,color:"#9a7acc",lineHeight:1.7}}>{r.liquidity_note}</div>
+                        </Box>
+                        <Box col="#1a3a2a" style={{gridColumn:"1/-1"}}>
+                          <Label col="#00b84a">VOLUME PROFILE</Label>
+                          <div style={{fontSize:11,color:"#4a8a6a",lineHeight:1.7}}>{r.volume_profile_note}</div>
+                        </Box>
+                      </div>
+
+                      {r.correlation_warning && (
+                        <div style={{background:"#1a1000",border:`1px solid #3a2a00`,borderRadius:4,padding:"8px 12px",fontSize:11,color:C.yellow,marginBottom:10}}>
+                          ⚠ KORRELATION: {r.correlation_warning}
+                        </div>
+                      )}
+
+                      {/* NARRATIVE */}
+                      <Box style={{borderLeft:`3px solid ${st.border}`,marginBottom:10}}>
+                        <Label>TRADE ANALYSE (alle Begriffe erklärt)</Label>
+                        <div style={{fontSize:12,color:"#8a9aaa",lineHeight:2,marginTop:6}}>{r.narrative}</div>
+                      </Box>
+
+                      <div style={{background:"#120f00",border:`1px solid #2a2000`,borderRadius:4,padding:"8px 12px",fontSize:11,color:C.yellow,marginBottom:14}}>
+                        ⛔ INVALIDIERUNG: {r.invalidation}
+                      </div>
+                    </>
+                  )}
+
+                  {/* BUTTONS */}
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:20}}>
+                    <button onClick={()=>setTab("input")} style={{background:"transparent",border:`1px solid #3a5a7a`,color:"#3a5a7a",padding:"8px 18px",fontSize:10,letterSpacing:1}}>
+                      ← NEUE ANALYSE
+                    </button>
+                    <button onClick={generate} disabled={running} style={{background:C.purple+"22",border:`1px solid ${C.purple}`,color:"#b39ddb",padding:"8px 18px",fontSize:10,letterSpacing:1}}>
+                      🔄 NOCHMAL
+                    </button>
+                  </div>
+
+                  {/* HISTORY */}
+                  {hist.length>0 && (
+                    <div>
+                      <Label>LETZTE SIGNALE</Label>
+                      {hist.map((h,i)=>{
+                        const sk2=["LONG","SHORT"].includes(h.result.signal)?h.result.signal:"NO SETUP";
+                        const sc=sigStyle(sk2).border;
+                        return(
+                          <div key={i} onClick={()=>setRes(h.result)} style={{background:C.midbg,border:`1px solid ${sc}33`,borderLeft:`3px solid ${sc}`,borderRadius:4,padding:"8px 12px",marginBottom:5,cursor:"pointer"}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                              <span style={{color:sc,fontWeight:700,fontSize:13,letterSpacing:2}}>{h.result.signal}</span>
+                              <span style={{color:"#2a4a6a",fontSize:10}}>{h.pair}{h.price?` · $${h.price}`:""} · F:{h.result.filters_passed}/10 · {h.ts}</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* ═══════════════ GUIDE TAB ═══════════════ */}
+        {tab==="guide" && (
+          <div className="si">
+
+            <Box col={C.blue} style={{marginBottom:12}}>
+              <Label col={C.blue}>🔧 SETUP — NUR EINMALIG NÖTIG</Label>
+              <div style={{fontSize:11,color:"#4a6a8a",lineHeight:1.9,marginBottom:10}}>
+                <strong style={{color:C.blue}}>Schritt 1:</strong> Cloudflare Worker Code unten kopieren<br/>
+                <strong style={{color:C.blue}}>Schritt 2:</strong> cloudflare.com → Workers & Pages → <code>binance-proxy</code> → Edit Code → alles ersetzen<br/>
+                <strong style={{color:C.blue}}>Schritt 3:</strong> Zeile <code>x-api-key</code> → deinen Anthropic API Key eintragen<br/>
+                <strong style={{color:C.blue}}>Schritt 4:</strong> Anthropic API Key: console.anthropic.com → API Keys → Create<br/>
+                <strong style={{color:C.blue}}>Schritt 5:</strong> Save and Deploy → URL in die App eintragen → fertig ✅
+              </div>
+              <div style={{background:"#060a0d",border:`1px solid ${C.border}`,borderRadius:4,padding:12,fontSize:10,color:"#4a8a6a",fontFamily:"monospace",lineHeight:1.9,whiteSpace:"pre-wrap",overflowX:"auto"}}>{`export default {
+  async fetch(request) {
+    const cors = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    };
+    if (request.method === "OPTIONS")
+      return new Response(null, { status: 204, headers: cors });
+
+    const url  = new URL(request.url);
+    const path = url.pathname;
+
+    // Binance Kerzendaten
+    if (path === "/" || path === "") {
+      const sym = url.searchParams.get("symbol");
+      const iv  = url.searchParams.get("interval") || "4h";
+      const lim = url.searchParams.get("limit") || "180";
+      if (!sym) return new Response("Missing symbol", {status:400,headers:cors});
+      const r = await fetch(
+        \`https://api.binance.com/api/v3/klines?symbol=\${sym}&interval=\${iv}&limit=\${lim}\`
+      );
+      return new Response(await r.text(), {
+        headers: {...cors, "Content-Type": "application/json"}
+      });
+    }
+
+    // Claude AI Signal
+    if (path === "/claude") {
+      const body = await request.text();
+      const r = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "anthropic-version": "2023-06-01",
+          "x-api-key": "DEIN_ANTHROPIC_API_KEY",  // ← hier eintragen
+        },
+        body: body,
+      });
+      return new Response(await r.text(), {
+        status: r.status,
+        headers: {...cors, "Content-Type": "application/json"}
+      });
+    }
+
+    return new Response("Not found", {status:404,headers:cors});
+  }
+};`}</div>
+            </Box>
+
+            <Box style={{marginBottom:12}}>
+              <Label col={C.green}>📋 SO BENUTZT DU DIE APP</Label>
+              {[
+                ["1. Live Daten laden","Pair wählen → LIVE LADEN klicken → echte Binance Kurse werden automatisch geladen"],
+                ["2. Charts beschreiben","TradingView öffnen mit 4C MACD Indikator. 4H/1H/15M MACD Farbe ablesen und kurz beschreiben"],
+                ["3. Optional: Liquidität","Equal Highs/Lows auf Chart markiert? FVG sichtbar? Erhöht die Präzision des Signals"],
+                ["4. Signal generieren","⚡ Button drücken → Bot analysiert alle 10 Filter → Signal mit Entry/Stop/Target"],
+              ].map(([t,d])=>(
+                <div key={t} style={{marginBottom:10,paddingBottom:10,borderBottom:`1px solid ${C.border}`}}>
+                  <div style={{fontSize:11,color:C.green,fontWeight:700,marginBottom:3}}>{t}</div>
+                  <div style={{fontSize:11,color:"#4a6a7a",lineHeight:1.6}}>{d}</div>
+                </div>
+              ))}
+            </Box>
+
+            <Box>
+              <Label>📚 WYCKOFF GLOSSAR</Label>
+              {[
+                ["Spring","Preis bricht kurz UNTER den Tiefpunkt der Range — Falle für Shorts. Schnapper zurück = bester Long-Entry (Phase C)"],
+                ["SC","Selling Climax: Panik-Ausverkauf mit massivem Volumen-Spike. Institutionen kaufen. Markiert Tief."],
+                ["LPS","Last Point of Support: Letzter Rücksetzer vor dem Ausbruch. Höheres Tief auf trockenem Volumen."],
+                ["SOS","Sign of Strength: Ausbruch über die Range-Oberkante mit Volumen. Bestätigt Akkumulation."],
+                ["CHoCH","Change of Character: 1H Preis bricht das letzte Lower High → Trend dreht bullisch."],
+                ["FVG","Fair Value Gap: Preislücke zwischen 3 schnellen Kerzen. Wird immer gefüllt = Magnetziel."],
+                ["OB","Orderblock: Letzte rote Kerze vor starkem Move = institutionelle Kaufzone."],
+                ["POC","Point of Control: Meistgehandelter Preis = stärkster Magnet."],
+                ["VAH/VAL","Value Area High/Low: Wo 70% des Volumens gehandelt wurde. Ausbrüche daraus = starke Moves."],
+              ].map(([t,d])=>(
+                <div key={t} style={{display:"flex",gap:10,marginBottom:7,paddingBottom:7,borderBottom:`1px solid ${C.border}`}}>
+                  <span style={{color:C.blue,minWidth:60,fontSize:11,fontWeight:700,flexShrink:0}}>{t}</span>
+                  <span style={{fontSize:11,color:"#4a6a7a",lineHeight:1.6}}>{d}</span>
+                </div>
+              ))}
+            </Box>
+
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
