@@ -28,8 +28,13 @@ const {useState,useEffect,useRef} = React;
 // Deine Cloudflare Worker URL — einmalig hier eintragen und speichern
 const DEFAULT_PROXY = localStorage.getItem("proxyUrl") || "";
 
-const PAIRS = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","LINKUSDT",
-               "AVAXUSDT","BTCUSDC","ETHUSDC","BNBUSDC","ETHBTC","SOLBTC","BNBBTC"];
+const CRYPTO_PAIRS=["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","LINKUSDT","AVAXUSDT","BTCUSDC","ETHUSDC","BNBUSDC","ETHBTC","SOLBTC","BNBBTC"];
+const FOREX_PAIRS=["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","EURJPY","GBPJPY","EURGBP","EURCHF"];
+const METALS_PAIRS=["XAUUSD","XAGUSD"];
+const INDEX_PAIRS=["US30","NAS100","SPX500"];
+const ALL_PAIRS=[...CRYPTO_PAIRS,...FOREX_PAIRS,...METALS_PAIRS,...INDEX_PAIRS];
+const PAIRS=ALL_PAIRS;
+const assetType=(p)=>FOREX_PAIRS.includes(p)?"forex":METALS_PAIRS.includes(p)?"metal":INDEX_PAIRS.includes(p)?"index":"crypto";
 
 const SYSTEM = `You are an elite crypto trading analyst using the Wyckoff Method + Smart Money Concepts + Volume Profile + 4C MACD.
 
@@ -247,16 +252,36 @@ function App(){
     setProxy(p); setPOk(true); setErr("");
   };
 
+  const fetchCandles=async(sym,iv,limit=180)=>{
+    const base=proxy.trim().replace(/\/$/,"");
+    const type=assetType(sym);
+    if(type==="crypto"){
+      const r=await fetch(`${base}/?symbol=${sym}&interval=${iv}&limit=${limit}`);
+      const d=await r.json();
+      if(!Array.isArray(d)) throw new Error("Binance: "+JSON.stringify(d).slice(0,100));
+      return d;
+    } else {
+      // Alpha Vantage via Cloudflare proxy /forex endpoint
+      const avIv=iv==="4h"?"60min":iv==="1h"?"60min":"15min";
+      const func=type==="index"?"TIME_SERIES_INTRADAY":(sym==="XAUUSD"||sym==="XAGUSD")?"FX_INTRADAY":"FX_INTRADAY";
+      const fromSym=sym.slice(0,3), toSym=sym.slice(3);
+      const r=await fetch(`${base}/forex?from_symbol=${fromSym}&to_symbol=${toSym}&interval=${avIv}&outputsize=compact`);
+      const d=await r.json();
+      // Convert AV format to Binance-like format [ts,o,h,l,c,v]
+      const key=Object.keys(d).find(k=>k.includes("Time Series"));
+      if(!key) throw new Error("AV Fehler: "+JSON.stringify(d).slice(0,150));
+      const series=d[key];
+      return Object.entries(series).sort((a,b)=>a[0]<b[0]?-1:1).map(([ts,v])=>[
+        Date.parse(ts),v["1. open"],v["2. high"],v["3. low"],v["4. close"],v["5. volume"]||"1000"
+      ]);
+    }
+  };
+
   const loadLive=async()=>{
     if(!proxy)return;
     setLoad(true); setErr("");
     try{
-      const base=proxy.trim().replace(/\/$/,"");
-      const [r4,r1,r15]=await Promise.all(
-        ["4h","1h","15m"].map(iv=>
-          fetch(`${base}/?symbol=${pair}&interval=${iv}&limit=180`).then(r=>r.json())
-        )
-      );
+      const [r4,r1,r15]=await Promise.all(["4h","1h","15m"].map(iv=>fetchCandles(pair,iv,180)));
       setLive({"4h":summarize(r4),"1h":summarize(r1),"15m":summarize(r15)});
     }catch(e){setErr("Live-Daten Fehler: "+e.message);}
     setLoad(false);
@@ -270,12 +295,7 @@ function App(){
     let freshLive=live;
     if(!freshLive){
       try{
-        const base=proxy.trim().replace(/\/$/,"");
-        const [r4,r1,r15]=await Promise.all(
-          ["4h","1h","15m"].map(iv=>
-            fetch(`${base}/?symbol=${pair}&interval=${iv}&limit=180`).then(r=>r.json())
-          )
-        );
+        const [r4,r1,r15]=await Promise.all(["4h","1h","15m"].map(iv=>fetchCandles(pair,iv,180)));
         freshLive={"4h":summarize(r4),"1h":summarize(r1),"15m":summarize(r15)};
         setLive(freshLive);
       }catch(e){setErr("Live-Daten Fehler: "+e.message);setRun(false);return;}
@@ -422,19 +442,25 @@ Signal only if 6+ filters pass. Be specific with price levels.`;
                 <span style={{color:"#7c4dff"}}>Wyckoff · MACD 4C · FVG · Equal Highs/Lows · Volume Profile · POC/VAH/VAL</span><br/>
                 <span style={{color:"#3a3060",fontSize:10}}>alles automatisch aus 180 echten Binance-Kerzen</span>
               </div>
-              <div style={{display:"flex",justifyContent:"center",gap:8,marginBottom:16,flexWrap:"wrap"}}>
-                {["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ETHBTC"].map(p=>(
-                  <button key={p} onClick={()=>{setPair(p);ls.set("pair",p);setLive(null);}}
-                    style={{background:pair===p?C.purple+"44":"transparent",border:`1px solid ${pair===p?C.purple:"#2a2040"}`,color:pair===p?"#b39ddb":"#3a3060",padding:"6px 14px",fontSize:11,borderRadius:20,cursor:"pointer"}}>
-                    {p}
-                  </button>
-                ))}
-                <select style={{background:"#0a0f15",border:"1px solid #2a2040",color:"#5a4a7a",padding:"6px 10px",borderRadius:20,fontSize:11}}
-                  onChange={e=>{if(e.target.value){setPair(e.target.value);ls.set("pair",e.target.value);setLive(null);}}}>
-                  <option value="">+ mehr</option>
-                  {["LINKUSDT","AVAXUSDT","BTCUSDC","ETHUSDC","BNBUSDC","SOLBTC","BNBBTC"].map(p=><option key={p}>{p}</option>)}
-                </select>
-              </div>
+              {/* Asset type tabs */}
+              {[
+                ["CRYPTO",C.blue,   ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT"]],
+                ["FOREX", "#00b84a",["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","EURJPY","GBPJPY","EURGBP","EURCHF"]],
+                ["METALS",C.yellow, ["XAUUSD","XAGUSD"]],
+                ["INDEX", "#ff6d00",["US30","NAS100","SPX500"]],
+              ].map(([cat,col,pairs])=>(
+                <div key={cat} style={{marginBottom:10}}>
+                  <div style={{fontSize:8,color:col,letterSpacing:3,marginBottom:6,fontWeight:700}}>{cat}</div>
+                  <div style={{display:"flex",justifyContent:"center",gap:6,flexWrap:"wrap"}}>
+                    {pairs.map(p=>(
+                      <button key={p} onClick={()=>{setPair(p);ls.set("pair",p);setLive(null);}}
+                        style={{background:pair===p?col+"33":"transparent",border:`1px solid ${pair===p?col:"#2a2030"}`,color:pair===p?col:"#3a3060",padding:"5px 12px",fontSize:11,borderRadius:20,cursor:"pointer",fontWeight:pair===p?700:400}}>
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
               {live && (
                 <div style={{background:"#071a0f",border:`1px solid ${C.green}44`,borderRadius:6,padding:"10px 16px",marginBottom:14,display:"inline-flex",gap:12,flexWrap:"wrap",alignItems:"center"}}>
                   <span style={{color:C.green,fontSize:18,fontWeight:700}}>💰 ${live["4h"]?.price}</span>
